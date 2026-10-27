@@ -1,0 +1,132 @@
+# =====================================================================
+# 阶段5 搜索筛选测试用例（REST Client 格式）
+# 前置：1) 已执行 npm run db:init（SQLite 建库，server/sql/init.sql）
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 说明：商品检索公开访问；求购检索需登录（匿名 401）
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录（求购检索需要 Token）
+# ---------------------------------------------------------------------
+
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+@studentToken = 粘贴上一步返回的 token
+
+# ---------------------------------------------------------------------
+# 1. 商品组合检索 GET /goods
+# ---------------------------------------------------------------------
+
+# 1.1 全条件组合：关键词 + 分类 + 价格区间 + 校区 + 成色 + 最新优先 + 分页
+# 期望：200，list 均为在售，按 create_time 倒序
+GET {{host}}/goods?keyword=教材&categoryId=1&minPrice=10&maxPrice=100&campus=东区&condition=几乎全新&sort=time&page=1&pageSize=10
+
+# 1.2 仅关键词（≥2字，走 FULLTEXT ngram 索引）
+GET {{host}}/goods?keyword=高等数学
+
+# 1.3 单字关键词（低于 ngram_token_size=2，服务自动回退 LIKE）
+GET {{host}}/goods?keyword=书
+
+# 1.4 空关键词 / 纯空白关键词 → 视为未筛选（不应过滤掉全部数据）
+GET {{host}}/goods?keyword=&page=1&pageSize=10
+GET {{host}}/goods?keyword=%20%20%20&page=1&pageSize=10
+
+# 1.5 空数字参数（表单未选择）→ 忽略，不报 400
+GET {{host}}/goods?categoryId=&minPrice=&maxPrice=&campus=&condition=&sort=&page=&pageSize=
+
+# 1.6 非法区间：minPrice > maxPrice → 400「最低价不能大于最高价」
+GET {{host}}/goods?minPrice=100&maxPrice=10
+
+# 1.7 非法枚举：校区/成色/排序 → 400
+GET {{host}}/goods?campus=中心区
+GET {{host}}/goods?condition=八成新
+GET {{host}}/goods?sort=hot
+
+# 1.8 价格升序 / 降序
+GET {{host}}/goods?sort=price_asc&page=1&pageSize=10
+GET {{host}}/goods?sort=price_desc&page=1&pageSize=10
+
+# 1.9 分页：第二页
+GET {{host}}/goods?page=2&pageSize=5
+
+# 1.10 每页超上限：pageSize=100 → 服务 clamp 为 50（响应 pageSize=50）
+GET {{host}}/goods?page=1&pageSize=100
+
+# ---------------------------------------------------------------------
+# 2. 求购组合检索 GET /wants（需登录）
+# ---------------------------------------------------------------------
+
+# 2.1 匿名访问 → 401「请先登录」
+GET {{host}}/wants?keyword=教材
+
+# 2.2 全条件组合：关键词 + 校区 + 期望成色 + 预算区间 + 最新优先 + 分页
+GET {{host}}/wants?keyword=教材&campus=东区&expectedCondition=几乎全新&minBudget=10&maxBudget=100&sort=time&page=1&pageSize=10
+Authorization: Bearer {{studentToken}}
+
+# 2.3 预算升序 / 降序
+GET {{host}}/wants?sort=budget_asc&page=1&pageSize=10
+Authorization: Bearer {{studentToken}}
+
+GET {{host}}/wants?sort=budget_desc&page=1&pageSize=10
+Authorization: Bearer {{studentToken}}
+
+# 2.4 非法预算区间：minBudget > maxBudget → 400「最低预算不能大于最高预算」
+GET {{host}}/wants?minBudget=100&maxBudget=10
+Authorization: Bearer {{studentToken}}
+
+# 2.5 空参/空白关键词 → 忽略，默认仅待接单
+GET {{host}}/wants?keyword=&status=&campus=&expectedCondition=&minBudget=&maxBudget=&sort=&page=&pageSize=
+Authorization: Bearer {{studentToken}}
+
+# 2.6 按状态筛选（已接单）
+GET {{host}}/wants?status=已接单
+Authorization: Bearer {{studentToken}}
+
+# 2.7 非法状态/排序 → 400
+GET {{host}}/wants?status=进行中
+Authorization: Bearer {{studentToken}}
+
+GET {{host}}/wants?sort=price_asc
+Authorization: Bearer {{studentToken}}
+
+# =====================================================================
+# 3. SQL 索引使用验证（SQLite 版：EXPLAIN QUERY PLAN，在 SQLite 客户端执行）
+# 说明：SQLite 无中文全文索引，关键词统一 LIKE 模糊匹配（数据量级小可接受）；
+#       等值/区间过滤与默认排序仍走 idx_* 索引。
+# =====================================================================
+# 3.1 商品-分类+价格区间+最新排序
+#   期望：SEARCH 命中 idx_goods_category 或 idx_goods_price 等索引
+# EXPLAIN QUERY PLAN
+#   SELECT id, title, price, create_time FROM goods
+#   WHERE is_deleted = 0 AND status = '在售'
+#     AND category_id = 1 AND price BETWEEN 10 AND 100
+#   ORDER BY create_time DESC, id DESC LIMIT 10;
+#
+# 3.2 商品-校区+成色
+# EXPLAIN QUERY PLAN
+#   SELECT id, title, campus, condition_level FROM goods
+#   WHERE is_deleted = 0 AND status = '在售'
+#     AND campus = '东区' AND condition_level = '几乎全新'
+#   ORDER BY create_time DESC, id DESC LIMIT 10;
+#
+# 3.3 求购-默认列表（期望命中 idx_want_status：status 过滤 + create_time 排序）
+# EXPLAIN QUERY PLAN
+#   SELECT id, item_name, budget, create_time FROM want_buy
+#   WHERE is_deleted = 0 AND status = '待接单'
+#   ORDER BY create_time DESC, id DESC LIMIT 10;
+#
+# 3.4 求购-预算区间
+# EXPLAIN QUERY PLAN
+#   SELECT id, item_name, budget, create_time FROM want_buy
+#   WHERE is_deleted = 0 AND status = '待接单' AND budget BETWEEN 10 AND 100
+#   ORDER BY create_time DESC, id DESC LIMIT 10;

@@ -1,0 +1,279 @@
+# =====================================================================
+# 阶段7 WebSocket 一对一私聊 测试用例（REST Client 格式）
+# 前置：1) 已执行 npm run db:init（SQLite 建库，server/sql/init.sql）
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 说明：会话/消息接口全部需登录；发起商品会话需实名（@RequireCertified）
+#       求购会话由阶段4接单接口自动创建，无需手动发起
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录
+# ---------------------------------------------------------------------
+
+# 0.1 登录（学生·已认证 20211231245，作为买家）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 0.2 登录（学生·未认证 20211231246，用于实名拦截验证）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+# 0.3 登录（管理员，作为卖家）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+@tokenBuyer = 粘贴0.1返回的token
+@tokenNoCert = 粘贴0.2返回的token
+@tokenSeller = 粘贴0.3返回的token
+
+# ---------------------------------------------------------------------
+# 0.4 准备在售商品：管理员发布（admin 已认证）→ 审核通过 → 填入 @goodsId
+# ---------------------------------------------------------------------
+POST {{host}}/goods
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "title": "私聊测试·二手自行车",
+  "price": 120,
+  "categoryId": 4,
+  "conditionLevel": "轻微使用",
+  "campus": "北区",
+  "tradeMethod": "当面交易",
+  "description": "毕业出，车况良好"
+}
+
+# 审核通过（路径ID替换为上一步商品ID）
+PATCH {{host}}/admin/goods/1/review
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+@goodsId = 1
+
+# ---------------------------------------------------------------------
+# 1. 发起会话 POST /chat/sessions（需实名）
+# ---------------------------------------------------------------------
+
+# 1.1 匿名发起 → 401
+POST {{host}}/chat/sessions
+Content-Type: application/json
+
+{
+  "goodsId": 1
+}
+
+# 1.2 未实名学生发起 → 403「请先完成实名认证」
+POST {{host}}/chat/sessions
+Authorization: Bearer {{tokenNoCert}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}}
+}
+
+# 1.3 买家发起成功 → 200，data.id=会话ID，reused=false
+POST {{host}}/chat/sessions
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}}
+}
+
+@sessionId = 粘贴1.3返回的会话ID
+
+# 1.4 重复发起（幂等）→ 200，同一会话ID，reused=true
+POST {{host}}/chat/sessions
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}}
+}
+
+# 1.5 卖家对自己商品发起 → 400「不能与自己发起私聊」
+POST {{host}}/chat/sessions
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}}
+}
+
+# 1.6 商品不存在 → 404
+POST {{host}}/chat/sessions
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": 99999
+}
+
+# ---------------------------------------------------------------------
+# 2. 发送消息 POST /chat/sessions/:id/messages（REST 通道）
+# ---------------------------------------------------------------------
+
+# 2.1 买家发送文本 → 200，返回含 senderId/receiverId/isRead=false
+POST {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "content": "你好，自行车还在吗？"
+}
+
+# 2.2 卖家回复 → 200
+POST {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "content": "还在的，可以随时看车"
+}
+
+# 2.3 买家发图片消息 → 200，msgType=图片
+POST {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "content": "https://example.com/uploads/student-card.jpg",
+  "msgType": "图片"
+}
+
+# 2.4 空内容 → 400；非法 msgType → 400
+POST {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "content": ""
+}
+
+POST {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "content": "test",
+  "msgType": "语音"
+}
+
+# 2.5 第三者（未认证学生）发消息 → 403「仅会话参与者可操作」
+POST {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenNoCert}}
+Content-Type: application/json
+
+{
+  "content": "我不是参与者"
+}
+
+# 2.6 会话不存在 → 404
+POST {{host}}/chat/sessions/99999/messages
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "content": "发给不存在的会话"
+}
+
+# ---------------------------------------------------------------------
+# 3. 会话列表 GET /chat/sessions
+# ---------------------------------------------------------------------
+
+# 3.1 买家会话列表 → 200，含该会话：peer=卖家摘要、goods 摘要、unreadCount=2、lastMessage
+GET {{host}}/chat/sessions?page=1&pageSize=10
+Authorization: Bearer {{tokenBuyer}}
+
+# 3.2 卖家会话列表 → 200，unreadCount=2（买家发的 2.1/2.3 两条未读）
+GET {{host}}/chat/sessions?page=1&pageSize=10
+Authorization: Bearer {{tokenSeller}}
+
+# 3.3 匿名 → 401
+GET {{host}}/chat/sessions
+
+# ---------------------------------------------------------------------
+# 4. 历史消息 GET /chat/sessions/:id/messages（拉取即已读）
+# ---------------------------------------------------------------------
+
+# 4.1 卖家拉历史 → 200，3 条按时间倒序；买家发的消息 isRead 全部置 true
+GET {{host}}/chat/sessions/{{sessionId}}/messages?page=1&pageSize=10
+Authorization: Bearer {{tokenSeller}}
+
+# 4.2 卖家再查会话列表 → unreadCount 变 0
+GET {{host}}/chat/sessions?page=1&pageSize=10
+Authorization: Bearer {{tokenSeller}}
+
+# 4.3 买家拉历史 → 卖家回复的 2.2 置为已读
+GET {{host}}/chat/sessions/{{sessionId}}/messages?page=1&pageSize=10
+Authorization: Bearer {{tokenBuyer}}
+
+# 4.4 分页：pageSize=2 第二页
+GET {{host}}/chat/sessions/{{sessionId}}/messages?page=2&pageSize=2
+Authorization: Bearer {{tokenBuyer}}
+
+# 4.5 第三者拉历史 → 403
+GET {{host}}/chat/sessions/{{sessionId}}/messages
+Authorization: Bearer {{tokenNoCert}}
+
+# ---------------------------------------------------------------------
+# 5. 求购接单自动建会话（阶段4对接验证）
+# ---------------------------------------------------------------------
+
+# 5.1 买家发布求购（需实名）→ 200
+POST {{host}}/wants
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "itemName": "求购台灯",
+  "budget": 30,
+  "campus": "东区"
+}
+
+@wantId = 粘贴5.1返回的求购ID
+
+# 5.2 卖家接单 → 200，自动创建会话（data.conversationId）
+POST {{host}}/wants/{{wantId}}/accept
+Authorization: Bearer {{tokenSeller}}
+
+# 5.3 买家会话列表 → 新增一条 wantId 非空、want 摘要为「求购台灯」的会话
+GET {{host}}/chat/sessions?page=1&pageSize=10
+Authorization: Bearer {{tokenBuyer}}
+
+# =====================================================================
+# 6. WebSocket 连通性自测（非 REST，用脚本验证）
+# =====================================================================
+# 前置：服务运行中。执行：
+#   node scripts/test-ws.js
+# 覆盖：匿名拒连 / JWT 握手鉴权 / REST 发消息→WS 收 message:new /
+#       WS message:send→对方收推送+本人收 ack / 历史已读 / 未读数 / 越权 403
+#
+# 手动连接示例（浏览器控制台）：
+#   const s = io('http://localhost:8080', { auth: { token: '你的JWT' } });
+#   s.on('connected', console.log);
+#   s.on('message:new', console.log);          // 接收一对一推送
+#   s.emit('message:send', { sessionId: 1, content: '你好' }, console.log);  // ack

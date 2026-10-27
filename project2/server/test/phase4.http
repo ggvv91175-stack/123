@@ -1,0 +1,244 @@
+# =====================================================================
+# 阶段4 测试用例（REST Client 格式，VS Code 装 REST Client 插件可直接执行）
+# 前置：1) 已执行 npm run db:init（SQLite 建库，want_buy.status 三值枚举已含）
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 账号：admin/admin123（管理员，已认证）
+#       20211231245/abc12345（已实名学生，求购发布者）
+#       20211231246/abc12345（未实名学生）
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# 说明：接单接口仅需登录，故借用 admin 作为「接单卖家」
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录拿 Token（把返回 data.token 填入下面变量）
+# ---------------------------------------------------------------------
+
+# 0.1 管理员登录（兼作接单卖家）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+# 0.2 已实名学生登录（求购发布者）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 0.3 未实名学生登录
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+@adminToken = 粘贴0.1返回的token
+@studentToken = 粘贴0.2返回的token
+@uncertifiedToken = 粘贴0.3返回的token
+
+# ---------------------------------------------------------------------
+# 1. 发布求购
+# ---------------------------------------------------------------------
+
+# 1.1 未实名用户发布求购 → 403「请先完成实名认证」
+POST {{host}}/wants
+Authorization: Bearer {{uncertifiedToken}}
+Content-Type: application/json
+
+{
+  "itemName": "求购台灯",
+  "budget": 20,
+  "campus": "东区",
+  "remark": "未实名应被拦截"
+}
+
+# 1.2 已实名用户发布成功
+# 期望：200，code=0，data.status='待接单'，记下 data.id（设为 @wantId）
+POST {{host}}/wants
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "求购高等数学教材（同济第七版）",
+  "budget": 30,
+  "expectedCondition": "几乎全新",
+  "campus": "东区",
+  "remark": "希望无笔记，东区图书馆面交"
+}
+
+# 1.3 预算为 0 → 400「预算最小为0.01元」
+POST {{host}}/wants
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "预算非法测试",
+  "budget": 0
+}
+
+# 1.4 物品名称超过 50 字符 → 400
+POST {{host}}/wants
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "0123456789012345678901234567890123456789012345678901234567890",
+  "budget": 10
+}
+
+# 1.5 发布第二条求购（用于关闭/已关闭接单测试）
+# 记下 data.id（设为 @wantId2）
+POST {{host}}/wants
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "求购自行车",
+  "budget": 200,
+  "campus": "西区",
+  "remark": "用于关闭测试"
+}
+
+# ---------------------------------------------------------------------
+# 2. 求购列表（登录可见）
+# ---------------------------------------------------------------------
+
+# 2.1 匿名访问 → 401「请先登录」
+GET {{host}}/wants?page=1&pageSize=10
+
+# 2.2 登录访问：默认仅返回「待接单」
+# 期望：200，list 中所有 status='待接单'
+GET {{host}}/wants?page=1&pageSize=10
+Authorization: Bearer {{uncertifiedToken}}
+
+# 2.3 关键词搜索（命中物品名称或描述）
+GET {{host}}/wants?keyword=数学
+Authorization: Bearer {{uncertifiedToken}}
+
+# 2.4 按状态筛选（已接单）
+GET {{host}}/wants?status=已接单
+Authorization: Bearer {{uncertifiedToken}}
+
+# 2.5 按校区筛选
+GET {{host}}/wants?campus=东区
+Authorization: Bearer {{uncertifiedToken}}
+
+# ---------------------------------------------------------------------
+# 3. 求购详情（登录可见）
+# ---------------------------------------------------------------------
+
+# 3.1 不存在的求购 → 404「求购不存在」
+GET {{host}}/wants/99999999
+Authorization: Bearer {{studentToken}}
+
+# 3.2 正常详情（含发布者摘要 publisher.nickname/isCertified）
+GET {{host}}/wants/替换为wantId
+Authorization: Bearer {{uncertifiedToken}}
+
+# ---------------------------------------------------------------------
+# 4. 编辑求购（仅本人，仅待接单）
+# ---------------------------------------------------------------------
+
+# 4.1 本人编辑成功（全量更新）
+PUT {{host}}/wants/替换为wantId
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "求购高等数学教材（同济第七版，含习题册）",
+  "budget": 35,
+  "expectedCondition": "轻微使用",
+  "campus": "南区",
+  "remark": "含习题册优先，价格可小议"
+}
+
+# 4.2 编辑他人求购 → 403「只能操作本人发布的求购」
+PUT {{host}}/wants/替换为wantId
+Authorization: Bearer {{uncertifiedToken}}
+Content-Type: application/json
+
+{
+  "itemName": "越权编辑",
+  "budget": 1
+}
+
+# 4.3 编辑不存在的求购 → 404
+PUT {{host}}/wants/99999999
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "不存在",
+  "budget": 1
+}
+
+# ---------------------------------------------------------------------
+# 5. 关闭求购（仅本人，待接单→已关闭）
+# ---------------------------------------------------------------------
+
+# 5.1 他人关闭 → 403
+PATCH {{host}}/wants/替换为wantId2/close
+Authorization: Bearer {{uncertifiedToken}}
+
+# 5.2 本人关闭成功
+# 期望：200，data.status='已关闭'
+PATCH {{host}}/wants/替换为wantId2/close
+Authorization: Bearer {{studentToken}}
+
+# 5.3 重复关闭 → 409「当前状态（已关闭）不可关闭」
+PATCH {{host}}/wants/替换为wantId2/close
+Authorization: Bearer {{studentToken}}
+
+# ---------------------------------------------------------------------
+# 6. 卖家接单（自动创建 chat_session）
+# ---------------------------------------------------------------------
+
+# 6.1 匿名接单 → 401
+POST {{host}}/wants/替换为wantId/accept
+
+# 6.2 本人接自己的求购 → 403「不能接自己的求购」
+POST {{host}}/wants/替换为wantId/accept
+Authorization: Bearer {{studentToken}}
+
+# 6.3 他人接单成功
+# 期望：200，data={conversationId, wantId, status:'已接单'}
+# 校验：chat_session 中 want_id=wantId、buyer_id=求购者(20211231245)、seller_id=接单人(admin)
+POST {{host}}/wants/替换为wantId/accept
+Authorization: Bearer {{adminToken}}
+
+# 6.4 重复接单 → 409「该求购已被接单或已关闭」
+POST {{host}}/wants/替换为wantId/accept
+Authorization: Bearer {{adminToken}}
+
+# 6.5 已关闭求购被接单 → 409
+POST {{host}}/wants/替换为wantId2/accept
+Authorization: Bearer {{adminToken}}
+
+# 6.6 已接单求购再编辑 → 409「该求购已被接单或已关闭，无法编辑」
+PUT {{host}}/wants/替换为wantId
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "itemName": "已被接单仍编辑",
+  "budget": 10
+}
+
+# 6.7 已接单求购再关闭 → 409
+PATCH {{host}}/wants/替换为wantId/close
+Authorization: Bearer {{studentToken}}
+
+# 6.8 已接单求购详情（状态应为已接单）
+GET {{host}}/wants/替换为wantId
+Authorization: Bearer {{uncertifiedToken}}

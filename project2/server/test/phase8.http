@@ -1,0 +1,253 @@
+# =====================================================================
+# 阶段8 订单模块 测试用例（REST Client 格式）
+# 前置：1) 已执行 npm run db:init（SQLite 建库，server/sql/init.sql）
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 说明：订单接口全部需登录；仅交易双方可查看/更新订单
+# 状态机：待沟通 →(confirm)→ 待交易 →(complete)→ 已完成（终态，联动商品已售出）
+#         待沟通/待交易 →(cancel)→ 已取消（终态）；非法流转 → 409
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录
+# ---------------------------------------------------------------------
+
+# 0.1 卖家（admin，已认证）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+# 0.2 买家（20211231245，已认证）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 0.3 第三者（20211231246）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+@tokenSeller = 粘贴0.1返回的token
+@tokenBuyer = 粘贴0.2返回的token
+@tokenThird = 粘贴0.3返回的token
+
+# ---------------------------------------------------------------------
+# 0.4 准备在售商品（卖家发布 → 审核通过 → 填入 @goodsId）
+# ---------------------------------------------------------------------
+POST {{host}}/goods
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "title": "订单测试·九成新自行车",
+  "price": 150,
+  "categoryId": 4,
+  "conditionLevel": "几乎全新",
+  "campus": "北区",
+  "tradeMethod": "当面交易",
+  "description": "毕业出"
+}
+
+PATCH {{host}}/admin/goods/1/review
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+@goodsId = 1
+
+# ---------------------------------------------------------------------
+# 1. 创建订单 POST /orders
+# ---------------------------------------------------------------------
+
+# 1.1 买家下单成功 → 200，status=待沟通，orderNo=XY+20位
+POST {{host}}/orders
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}},
+  "appointmentPlace": "东区图书馆门口",
+  "appointmentTime": "2026-10-30T18:30:00+08:00",
+  "remark": "希望当面验货"
+}
+
+@orderId = 粘贴1.1返回的订单ID
+
+# 1.2 匿名下单 → 401
+POST {{host}}/orders
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}},
+  "appointmentPlace": "东区"
+}
+
+# 1.3 卖家买自己商品 → 400「不能购买自己发布的商品」
+POST {{host}}/orders
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}},
+  "appointmentPlace": "东区"
+}
+
+# 1.4 约定时间为过去 → 400「约定时间不能早于当前时间」
+POST {{host}}/orders
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}},
+  "appointmentPlace": "东区",
+  "appointmentTime": "2020-01-01T08:00:00+08:00"
+}
+
+# 1.5 商品不存在 → 404；非在售商品 → 409「商品当前不可交易」
+POST {{host}}/orders
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": 99999,
+  "appointmentPlace": "东区"
+}
+
+# ---------------------------------------------------------------------
+# 2. 状态流转 PATCH /orders/:id/status
+# ---------------------------------------------------------------------
+
+# 2.1 非法流转：待沟通直接 complete → 409
+PATCH {{host}}/orders/{{orderId}}/status
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "action": "complete"
+}
+
+# 2.2 第三者流转 → 403「仅交易双方可查看或操作订单」
+PATCH {{host}}/orders/{{orderId}}/status
+Authorization: Bearer {{tokenThird}}
+Content-Type: application/json
+
+{
+  "action": "confirm"
+}
+
+# 2.3 confirm：待沟通 → 待交易（买卖双方均可操作）
+PATCH {{host}}/orders/{{orderId}}/status
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "action": "confirm"
+}
+
+# 2.4 complete：待交易 → 已完成；关联商品同事务置为已售出
+PATCH {{host}}/orders/{{orderId}}/status
+Authorization: Bearer {{tokenSeller}}
+Content-Type: application/json
+
+{
+  "action": "complete"
+}
+
+# 2.5 已完成（终态）再流转 → 409
+PATCH {{host}}/orders/{{orderId}}/status
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "action": "cancel"
+}
+
+# 2.6 取消链路：重新下单 → cancel → 已取消（终态，再 confirm → 409）
+POST {{host}}/orders
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "goodsId": {{goodsId}},
+  "appointmentPlace": "北区操场"
+}
+
+# 注意：1.1 商品已被 complete 置为已售出，此处应 409；如需演示取消链路，
+# 请重新发布并审核一件商品后下单，再执行：
+PATCH {{host}}/orders/2/status
+Authorization: Bearer {{tokenBuyer}}
+Content-Type: application/json
+
+{
+  "action": "cancel"
+}
+
+# ---------------------------------------------------------------------
+# 3. 列表 GET /orders（role=buy 我的买到 / role=sell 我的卖出）
+# ---------------------------------------------------------------------
+
+# 3.1 我的买到（买家视角，默认 role=buy）
+GET {{host}}/orders?page=1&pageSize=10
+Authorization: Bearer {{tokenBuyer}}
+
+# 3.2 我的卖出（卖家视角）
+GET {{host}}/orders?role=sell&page=1&pageSize=10
+Authorization: Bearer {{tokenSeller}}
+
+# 3.3 状态筛选（已完成）
+GET {{host}}/orders?role=buy&status=已完成
+Authorization: Bearer {{tokenBuyer}}
+
+# 3.4 非法视角/状态 → 400
+GET {{host}}/orders?role=all
+Authorization: Bearer {{tokenBuyer}}
+
+GET {{host}}/orders?status=进行中
+Authorization: Bearer {{tokenBuyer}}
+
+# 3.5 匿名 → 401
+GET {{host}}/orders
+
+# ---------------------------------------------------------------------
+# 4. 详情 GET /orders/:id
+# ---------------------------------------------------------------------
+
+# 4.1 买家查看 → 200，含 goods 摘要（标题/价格/封面）、buyer/seller/peer 摘要、约定信息
+GET {{host}}/orders/{{orderId}}
+Authorization: Bearer {{tokenBuyer}}
+
+# 4.2 卖家查看 → 200
+GET {{host}}/orders/{{orderId}}
+Authorization: Bearer {{tokenSeller}}
+
+# 4.3 第三者查看 → 403
+GET {{host}}/orders/{{orderId}}
+Authorization: Bearer {{tokenThird}}
+
+# 4.4 订单不存在 → 404
+GET {{host}}/orders/99999
+Authorization: Bearer {{tokenBuyer}}
+
+# =====================================================================
+# 5. 全自动自测（覆盖本文件全部场景 + 并发条件更新）
+# =====================================================================
+#   node scripts/test-order.js
+# 期望输出：27 通过，0 失败

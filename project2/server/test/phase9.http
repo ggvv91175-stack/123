@@ -1,0 +1,427 @@
+# =====================================================================
+# 阶段9 举报模块 + 管理员后台剩余接口 测试用例（REST Client 格式）
+# 前置：1) 已执行 npm run db:init（SQLite 建库，server/sql/init.sql）
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 说明：举报需登录；/admin/** 全部接口仅 admin 角色可访问（学生 403 / 匿名 401）
+# 举报状态机：待处理 →(处理动作)→ 已处理；待处理 →(驳回举报)→ 已驳回（终态）
+# 动作-类型映射：商品→下架商品/警告用户/驳回；求购→警告用户/驳回；
+#               用户→封禁用户/警告用户/驳回；留言→删除留言/警告用户/驳回
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录
+# ---------------------------------------------------------------------
+
+# 0.1 管理员
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+# 0.2 学生A（20211231245，已认证）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 0.3 学生B（20211231246）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+@tokenAdmin = 粘贴0.1返回的token
+@tokenA = 粘贴0.2返回的token
+@tokenB = 粘贴0.3返回的token
+
+# ---------------------------------------------------------------------
+# 0.4 准备数据：A 发布商品（admin 审核通过）+ A 发布求购 + B 给商品留言
+# ---------------------------------------------------------------------
+POST {{host}}/goods
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "title": "举报测试·闲置台灯",
+  "price": 25,
+  "categoryId": 3,
+  "conditionLevel": "轻微使用痕迹",
+  "campus": "南区",
+  "tradeMethod": "当面交易",
+  "description": "功能正常"
+}
+
+PATCH {{host}}/admin/goods/1/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+POST {{host}}/wants
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "title": "求购一本操作系统教材",
+  "categoryId": 1,
+  "expectedPrice": 30,
+  "campus": "南区",
+  "description": "第八版即可"
+}
+
+POST {{host}}/goods/1/comments
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": "台灯还在吗？"
+}
+
+@goodsId = 1
+@wantId = 1
+@commentId = 1
+
+# ---------------------------------------------------------------------
+# 1. 用户举报 POST /reports（登录用户）
+# ---------------------------------------------------------------------
+
+# 1.1 B 举报 A 的商品 → 200，status=待处理
+POST {{host}}/reports
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "targetType": "商品",
+  "targetId": {{goodsId}},
+  "reason": "图片与实物不符，疑似虚假信息",
+  "evidenceImages": ["https://example.com/ev1.png"]
+}
+
+# 1.2 重复举报同一对象（仍有待处理记录）→ 409「您已举报过该对象，请等待处理结果」
+POST {{host}}/reports
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "targetType": "商品",
+  "targetId": {{goodsId}},
+  "reason": "再举报一次"
+}
+
+# 1.3 举报不存在的商品 → 404「举报对象不存在或已删除」
+POST {{host}}/reports
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "targetType": "商品",
+  "targetId": 99999,
+  "reason": "测试"
+}
+
+# 1.4 举报自己发布的内容 → 400「不能举报自己发布的内容」
+POST {{host}}/reports
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "targetType": "商品",
+  "targetId": {{goodsId}},
+  "reason": "测试自举报"
+}
+
+# 1.5 匿名举报 → 401
+POST {{host}}/reports
+Content-Type: application/json
+
+{
+  "targetType": "商品",
+  "targetId": {{goodsId}},
+  "reason": "匿名"
+}
+
+# 1.6 非法目标类型 → 400；理由为空/超300字 → 400
+POST {{host}}/reports
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "targetType": "订单",
+  "targetId": 1,
+  "reason": "非法类型"
+}
+
+# 1.7 举报求购 → 200
+POST {{host}}/reports
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "targetType": "求购",
+  "targetId": {{wantId}},
+  "reason": "求购信息含联系方式导流"
+}
+
+# 1.8 举报用户 → 200
+POST {{host}}/reports
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "targetType": "用户",
+  "targetId": 2,
+  "reason": "该用户发布违规内容"
+}
+
+# 1.9 举报留言 → 200（留言需为正常状态）
+POST {{host}}/reports
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "targetType": "留言",
+  "targetId": {{commentId}},
+  "reason": "留言骚扰"
+}
+
+# ---------------------------------------------------------------------
+# 2. 权限加固：学生/匿名访问 /admin/** 一律拒绝
+# ---------------------------------------------------------------------
+
+# 2.1 学生访问举报列表 → 403
+GET {{host}}/admin/reports
+Authorization: Bearer {{tokenA}}
+
+# 2.2 学生处理举报 → 403
+PATCH {{host}}/admin/reports/1/handle
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "action": "下架商品"
+}
+
+# 2.3 学生访问用户列表 → 403
+GET {{host}}/admin/users
+Authorization: Bearer {{tokenA}}
+
+# 2.4 学生禁用账号 → 403
+PATCH {{host}}/admin/users/3/status
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "action": "disable"
+}
+
+# 2.5 学生访问数据看板 → 403；匿名访问任一 admin 接口 → 401
+GET {{host}}/admin/dashboard/stats
+Authorization: Bearer {{tokenA}}
+
+GET {{host}}/admin/dashboard/stats
+
+# ---------------------------------------------------------------------
+# 3. 管理员举报列表 GET /admin/reports
+# ---------------------------------------------------------------------
+
+# 3.1 默认待处理列表（按举报时间正序，含 reporter 摘要）→ total=4
+GET {{host}}/admin/reports
+Authorization: Bearer {{tokenAdmin}}
+
+# 3.2 按目标类型筛选（求购）→ 1 条
+GET {{host}}/admin/reports?targetType=求购
+Authorization: Bearer {{tokenAdmin}}
+
+# 3.3 状态筛选（已处理）+ 分页
+GET {{host}}/admin/reports?status=已处理&page=1&pageSize=10
+Authorization: Bearer {{tokenAdmin}}
+
+# ---------------------------------------------------------------------
+# 4. 处理举报 PATCH /admin/reports/:id/handle（同事务联动处置目标）
+# ---------------------------------------------------------------------
+
+# 4.1 动作与类型不匹配：商品举报选「封禁用户」→ 400（提示可选动作）
+PATCH {{host}}/admin/reports/1/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "封禁用户"
+}
+
+# 4.2 下架商品 → 200 status=已处理；商品1 联动「违规下架」
+PATCH {{host}}/admin/reports/1/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "下架商品",
+  "result": "核实为虚假信息，予以下架"
+}
+
+GET {{host}}/goods/{{goodsId}}
+Authorization: Bearer {{tokenAdmin}}
+
+# 4.3 重复处理同一举报 → 409「该举报已被处理」
+PATCH {{host}}/admin/reports/1/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "下架商品"
+}
+
+# 4.4 驳回举报但未填说明 → 400「驳回举报时必须填写处理说明」
+PATCH {{host}}/admin/reports/2/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "驳回举报"
+}
+
+# 4.5 驳回求购举报 → 200 status=已驳回（目标不受影响）
+PATCH {{host}}/admin/reports/2/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "驳回举报",
+  "result": "求购内容未违规"
+}
+
+# 4.6 封禁用户（举报单3，目标A）→ A 的旧 Token 立即 401、登录 403「账号已被禁用」
+PATCH {{host}}/admin/reports/3/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "封禁用户",
+  "result": "多次违规，封禁处理"
+}
+
+GET {{host}}/users/me
+Authorization: Bearer {{tokenA}}
+
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 4.7 删除留言（举报单4）→ 留言软删除，商品留言列表不可见
+PATCH {{host}}/admin/reports/4/handle
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "删除留言",
+  "result": "留言含骚扰内容"
+}
+
+GET {{host}}/goods/{{goodsId}}/comments
+
+# 注意：封禁 admin 账号会在联动前被 400 拦截「不能封禁管理员账号」
+
+# ---------------------------------------------------------------------
+# 5. 用户管理
+# ---------------------------------------------------------------------
+
+# 5.1 用户列表（默认全部，注册时间倒序；不含 passwordHash）
+GET {{host}}/admin/users?page=1&pageSize=10
+Authorization: Bearer {{tokenAdmin}}
+
+# 5.2 关键词模糊（学号/昵称）→ 命中 2 名学生
+GET {{host}}/admin/users?keyword=20211231
+Authorization: Bearer {{tokenAdmin}}
+
+# 5.3 组合筛选：正常状态 + student 角色 + 已实名
+GET {{host}}/admin/users?status=正常&role=student&isCertified=true
+Authorization: Bearer {{tokenAdmin}}
+
+# 5.4 解禁 A（4.6 被封禁）：action=enable → 200，A 重新登录恢复正常
+PATCH {{host}}/admin/users/2/status
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "enable"
+}
+
+# 5.5 禁用 B → 200；B 旧 Token 立即 401（tokenVersion+1 全量吊销）
+PATCH {{host}}/admin/users/3/status
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "disable"
+}
+
+GET {{host}}/users/me
+Authorization: Bearer {{tokenB}}
+
+# 5.6 重复禁用 → 409「该账号已是禁用状态」；禁用 admin → 400；用户不存在 → 404；非法 action → 400
+PATCH {{host}}/admin/users/3/status
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "disable"
+}
+
+PATCH {{host}}/admin/users/1/status
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "disable"
+}
+
+PATCH {{host}}/admin/users/99999/status
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "disable"
+}
+
+# 5.7 解禁 B 恢复
+PATCH {{host}}/admin/users/3/status
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "action": "enable"
+}
+
+# ---------------------------------------------------------------------
+# 6. 平台数据看板 GET /admin/dashboard/stats
+# ---------------------------------------------------------------------
+
+# 6.1 → 200：{userTotal, goodsTotal, goodsOnSale, wantTotal, wantOpen,
+#      pending:{certifications, goods, reports}}
+GET {{host}}/admin/dashboard/stats
+Authorization: Bearer {{tokenAdmin}}
+
+# =====================================================================
+# 7. 全自动自测（覆盖本文件全部场景 + 联动断言）
+# =====================================================================
+#   node scripts/test-admin.js
+# 期望输出：35 通过，0 失败

@@ -1,0 +1,255 @@
+# =====================================================================
+# 阶段6 商品留言&回复 测试用例（REST Client 格式）
+# 前置：1) init.sql 已变更（message_comment 新增 parent_id/reply_to_user_id），
+#          必须删除 server/data/campus_xianyu.db* 后重新执行 npm run db:init
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 说明：留言/回复需登录（不要求实名）；留言列表跟随商品可见性
+#       （在售公开；非在售仅本人/管理员可见，其余 404）
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录（写操作需要 Token；留言不要求实名，未认证学生也可留言）
+# ---------------------------------------------------------------------
+
+# 0.1 登录（学生·已认证 20211231245）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 0.2 登录（学生·未认证 20211231246）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+# 0.3 登录（管理员）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+@tokenA = 粘贴0.1返回的token（20211231245）
+@tokenB = 粘贴0.2返回的token（20211231246）
+@tokenAdmin = 粘贴0.3返回的token
+
+# ---------------------------------------------------------------------
+# 0.4 准备在售商品：学生A发布 → 管理员审核通过 → 将在售商品ID填入 @goodsId
+# ---------------------------------------------------------------------
+POST {{host}}/goods
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "title": "九成新高等数学教材",
+  "price": 25.5,
+  "categoryId": 1,
+  "conditionLevel": "几乎全新",
+  "campus": "东区",
+  "tradeMethod": "当面交易",
+  "description": "同济第七版，无笔记"
+}
+
+# 审核通过（路径ID替换为上一步返回的商品ID）→ 状态变「在售」
+PATCH {{host}}/admin/goods/1/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+# 将在售商品ID填入（替换为 0.4 发布并审核通过的商品ID）
+@goodsId = 1
+
+# ---------------------------------------------------------------------
+# 1. 新增留言 POST /goods/:goodsId/comments
+# ---------------------------------------------------------------------
+
+# 1.1 匿名留言 → 401「请先登录」
+POST {{host}}/goods/{{goodsId}}/comments
+Content-Type: application/json
+
+{
+  "content": "匿名留言应被拦截"
+}
+
+# 1.2 学生B留言成功（未实名也可留言）→ 200，data.id>0，parentId=null
+POST {{host}}/goods/{{goodsId}}/comments
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": "这本书还在吗？可以东区图书馆面交吗？"
+}
+
+# 1.3 学生A（卖家）也留言一条 → 200
+POST {{host}}/goods/{{goodsId}}/comments
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "content": "另有同系列线性代数教材，需要的可留言"
+}
+
+# 1.4 内容为空 → 400「留言内容不能为空」
+POST {{host}}/goods/{{goodsId}}/comments
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": ""
+}
+
+# 1.5 内容超长（>500字符）→ 400
+POST {{host}}/goods/{{goodsId}}/comments
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": "此处粘贴501个以上字符的字符串"
+}
+
+# 1.6 商品不存在 → 404「商品不存在」
+POST {{host}}/goods/99999/comments
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": "给不存在的商品留言"
+}
+
+# ---------------------------------------------------------------------
+# 2. 回复留言 POST /comments/:id/replies
+# ---------------------------------------------------------------------
+# 将 1.2 返回的留言ID填入 @commentId
+@commentId = 1
+
+# 2.1 卖家A回复买家B → 200，parentId=顶层留言ID，replyToUserId=B的ID
+POST {{host}}/comments/{{commentId}}/replies
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "content": "还在的，今晚七点图书馆门口可以"
+}
+
+# 2.2 买家B再回复卖家的回复（应平铺挂到顶层，replyToUserId=A的ID）
+# 先将 2.1 返回的回复ID填入 @replyId
+@replyId = 2
+POST {{host}}/comments/{{replyId}}/replies
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": "好的，准时到"
+}
+
+# 2.3 匿名回复 → 401
+POST {{host}}/comments/{{commentId}}/replies
+Content-Type: application/json
+
+{
+  "content": "匿名回复应被拦截"
+}
+
+# 2.4 回复不存在的留言 → 404「留言不存在或已删除」
+POST {{host}}/comments/99999/replies
+Authorization: Bearer {{tokenB}}
+Content-Type: application/json
+
+{
+  "content": "回复不存在的留言"
+}
+
+# ---------------------------------------------------------------------
+# 3. 留言列表 GET /goods/:goodsId/comments（分页）
+# ---------------------------------------------------------------------
+
+# 3.1 匿名访问在售商品留言列表 → 200
+# 期望：list 按 create_time 倒序；1.2 顶层留言的 replies 含 2.1/2.2 两条，
+#       按时间正序；回复含 user 与 replyToUser 摘要（昵称/头像）
+GET {{host}}/goods/{{goodsId}}/comments?page=1&pageSize=10
+
+# 3.2 分页：pageSize=1 第二页 → 200，list 长度1，total=2
+GET {{host}}/goods/{{goodsId}}/comments?page=2&pageSize=1
+
+# 3.3 pageSize 超上限 100 → 服务端 clamp 为 50
+GET {{host}}/goods/{{goodsId}}/comments?page=1&pageSize=100
+
+# 3.4 商品不存在 → 404
+GET {{host}}/goods/99999/comments
+
+# 3.5 非在售商品（重新发布一条待审核商品），匿名访问其留言 → 404（不泄露）
+#     本人/管理员访问 → 200
+POST {{host}}/goods
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "title": "待审核的二手台灯",
+  "price": 15,
+  "categoryId": 3,
+  "conditionLevel": "轻微使用",
+  "campus": "西区",
+  "tradeMethod": "宿舍自提",
+  "description": "待审核商品，留言不对外公开"
+}
+
+@pendingGoodsId = 替换为上一步返回的商品ID
+
+# 3.5a 匿名 → 404
+GET {{host}}/goods/{{pendingGoodsId}}/comments
+
+# 3.5b 本人 → 200
+GET {{host}}/goods/{{pendingGoodsId}}/comments
+Authorization: Bearer {{tokenA}}
+
+# ---------------------------------------------------------------------
+# 4. 删除留言 DELETE /comments/:id（软删除）
+# ---------------------------------------------------------------------
+
+# 4.1 匿名删除 → 401
+DELETE {{host}}/comments/{{commentId}}
+
+# 4.2 非本人删除（卖家A删买家B的顶层留言）→ 403「只能删除本人的留言」
+DELETE {{host}}/comments/{{commentId}}
+Authorization: Bearer {{tokenA}}
+
+# 4.3 本人删除回复（B删自己的 2.2 回复）→ 200；列表中该回复消失，其余保留
+DELETE {{host}}/comments/{{replyId}}
+Authorization: Bearer {{tokenB}}
+
+# 4.4 本人删除顶层留言（B删 1.2 留言）→ 200
+# 期望：同事务级联软删其下所有回复，列表中该顶层及回复全部消失
+DELETE {{host}}/comments/{{commentId}}
+Authorization: Bearer {{tokenB}}
+
+# 4.5 重复删除同一留言 → 404「留言不存在」
+DELETE {{host}}/comments/{{commentId}}
+Authorization: Bearer {{tokenB}}
+
+# 4.6 回复已删除的留言 → 404「留言不存在或已删除」
+POST {{host}}/comments/{{commentId}}/replies
+Authorization: Bearer {{tokenA}}
+Content-Type: application/json
+
+{
+  "content": "回复已删除的留言"
+}
+
+# 4.7 验证删除结果：列表仅剩 1.3 一条顶层留言，total=1
+GET {{host}}/goods/{{goodsId}}/comments?page=1&pageSize=10

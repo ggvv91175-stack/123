@@ -1,0 +1,86 @@
+name: campus-xianyu
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: campus-xianyu-mysql
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: campus_xianyu
+      # 让 mysql 容器对 utf8mb4 更彻底
+      LANG: C.UTF-8
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=caching_sha2_password
+      - --skip-log-bin
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # MySQL 容器首次启动时自动执行初始化 SQL（建表 + 种子数据，幂等）
+      - ./server/sql/init.mysql.sql:/docker-entrypoint-initdb.d/init.mysql.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    networks:
+      - app-net
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: campus-xianyu-server:latest
+    container_name: campus-xianyu-server
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      NODE_ENV: production
+      APP_PORT: 8080
+      DB_TYPE: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: ${MYSQL_ROOT_PASSWORD:-root123456}
+      DB_NAME: campus_xianyu
+      JWT_SECRET: ${JWT_SECRET:-please-change-me-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-2h}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      UPLOAD_DIR: /app/uploads
+    expose:
+      - "8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      # 上传图片持久化；可替换为对象存储（见 README）
+      - uploads-data:/app/uploads
+    networks:
+      - app-net
+
+  web:
+    build:
+      context: ./campus-xianyu-ui
+      dockerfile: Dockerfile
+    image: campus-xianyu-web:latest
+    container_name: campus-xianyu-web
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "${WEB_PORT:-80}:80"
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  uploads-data:

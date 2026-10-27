@@ -1,0 +1,1 @@
+import{d as a,o as i,m as s,w as n,r,a0 as m}from"./index-CSC0B5b1.js";const d=a({__name:"EmptyState",props:{description:{default:"暂无数据"},imageSize:{default:160}},setup(e){return(t,p)=>{const o=r("el-empty");return i(),s(o,{description:e.description,"image-size":e.imageSize},{default:n(()=>[m(t.$slots,"default")]),_:3},8,["description","image-size"])}}});export{d as _};

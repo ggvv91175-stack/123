@@ -1,0 +1,332 @@
+# =====================================================================
+# 阶段2 测试用例（REST Client 格式，VS Code 装 REST Client 插件可直接执行）
+# 前置：1) 已执行 npm run db:init（SQLite 建库，server/sql/init.sql）
+#       2) 已执行 npm run seed:accounts 预置测试账号
+#       3) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 健康检查（公开）
+# 期望：200，code=0，data.status='ok'
+# ---------------------------------------------------------------------
+GET {{host}}/health
+
+# ---------------------------------------------------------------------
+# 1. 认证模块 Auth
+# ---------------------------------------------------------------------
+
+# 1.1 注册成功
+# 期望：200，code=0，data.userId > 0
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "studentNo": "20211231247",
+  "password": "abc12345",
+  "nickname": "王五",
+  "phone": "13800000001"
+}
+
+# 1.2 注册-学号重复 → 409「该学号已注册」
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345",
+  "nickname": "重复学号"
+}
+
+# 1.3 注册-密码不符合规则（纯数字）→ 400 参数错误
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "studentNo": "20211231248",
+  "password": "12345678",
+  "nickname": "弱密码"
+}
+
+# 1.4 注册-学号格式非法（含字母）→ 400 参数错误
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "studentNo": "abc123",
+  "password": "abc12345",
+  "nickname": "非法学号"
+}
+
+# 1.5 登录成功（学生·已认证）
+# 期望：200，data.token 非空，data.user.isCertified=true，学号脱敏 studentNoMasked
+# 说明：登录后请将返回的 token 填入下方 @tokenStudent / @tokenAdmin 变量
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 1.6 登录成功（学生·未认证）→ data.user.isCertified=false
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+# 1.7 登录成功（管理员）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+# 1.8 登录-密码错误 → 400「学号或密码错误」（不泄露是学号错还是密码错）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "wrong1234"
+}
+
+# 1.9 登录-学号不存在 → 400「学号或密码错误」
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "99999999999",
+  "password": "abc12345"
+}
+
+# ---------------------------------------------------------------------
+# 以下请求需要登录态。先用 1.5 / 1.7 获取 token 填入变量：
+# ---------------------------------------------------------------------
+@tokenStudent = 在此填入学生20211231245登录返回的token
+@tokenStudentNoCert = 在此填入学生20211231246登录返回的token
+@tokenAdmin = 在此填入admin登录返回的token
+
+# 1.10 未携带 Token 访问受保护接口 → 401「请先登录」
+GET {{host}}/users/me
+
+# 1.11 退出登录 → 200；随后该 Token 进入黑名单
+POST {{host}}/auth/logout
+Authorization: Bearer {{tokenStudent}}
+
+# 1.12 退出后复用同一 Token → 401「登录已过期，请重新登录」（黑名单拦截）
+GET {{host}}/users/me
+Authorization: Bearer {{tokenStudent}}
+
+# ---------------------------------------------------------------------
+# 2. 用户模块 User（重新登录获取新 token 后执行）
+# ---------------------------------------------------------------------
+
+# 2.1 获取个人信息 → 200，本人可见完整 studentNo / phone
+GET {{host}}/users/me
+Authorization: Bearer {{tokenStudent}}
+
+# 2.2 修改昵称/头像/学院 → 200
+PUT {{host}}/users/me
+Authorization: Bearer {{tokenStudent}}
+Content-Type: application/json
+
+{
+  "nickname": "张三改",
+  "avatar": "https://example.com/avatar/zs.png",
+  "college": "计算机学院"
+}
+
+# 2.3 修改密码-原密码错误 → 400「原密码错误」
+PUT {{host}}/users/me/password
+Authorization: Bearer {{tokenStudent}}
+Content-Type: application/json
+
+{
+  "oldPassword": "wrong1234",
+  "newPassword": "newpass123"
+}
+
+# 2.4 修改密码-新旧密码相同 → 400「新密码不能与原密码相同」
+PUT {{host}}/users/me/password
+Authorization: Bearer {{tokenStudent}}
+Content-Type: application/json
+
+{
+  "oldPassword": "abc12345",
+  "newPassword": "abc12345"
+}
+
+# 2.5 修改密码成功 → 200；token_version+1，旧 Token 全量失效
+PUT {{host}}/users/me/password
+Authorization: Bearer {{tokenStudent}}
+Content-Type: application/json
+
+{
+  "oldPassword": "abc12345",
+  "newPassword": "newpass123"
+}
+
+# 2.6 改密后旧 Token 访问 → 401（tokenVersion 不一致，实时校验拦截）
+# 验证后请用新密码 newpass123 重新登录
+GET {{host}}/users/me
+Authorization: Bearer {{tokenStudent}}
+
+# 2.7 新密码重新登录 → 200（验证改密生效）
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "newpass123"
+}
+
+# ---------------------------------------------------------------------
+# 3. 实名认证（用户侧）
+# ---------------------------------------------------------------------
+
+# 3.1 提交实名认证成功（未认证学生）→ 200，状态「待审核」
+POST {{host}}/users/me/certification
+Authorization: Bearer {{tokenStudentNoCert}}
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "college": "经济管理学院",
+  "proofImages": ["https://example.com/proof/card1.jpg"]
+}
+
+# 3.2 重复提交（当前有待审核记录）→ 409「请勿重复提交，当前认证状态：待审核」
+POST {{host}}/users/me/certification
+Authorization: Bearer {{tokenStudentNoCert}}
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "college": "经济管理学院",
+  "proofImages": ["https://example.com/proof/card1.jpg"]
+}
+
+# 3.3 证明材料为空数组 → 400 参数错误（1~3 张）
+POST {{host}}/users/me/certification
+Authorization: Bearer {{tokenStudentNoCert}}
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "college": "经济管理学院",
+  "proofImages": []
+}
+
+# 3.4 证明材料超过 3 张 → 400 参数错误
+POST {{host}}/users/me/certification
+Authorization: Bearer {{tokenStudentNoCert}}
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "college": "经济管理学院",
+  "proofImages": ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+}
+
+# 3.5 查询我的认证状态 → 200，data.status='待审核'（无记录时 data=null）
+GET {{host}}/users/me/certification
+Authorization: Bearer {{tokenStudentNoCert}}
+
+# ---------------------------------------------------------------------
+# 4. 管理员审核（管理侧）
+# ---------------------------------------------------------------------
+
+# 4.1 学生访问管理员接口 → 403「无权限访问管理功能」（RolesGuard 垂直越权拦截）
+GET {{host}}/admin/certifications
+Authorization: Bearer {{tokenStudent}}
+
+# 4.2 管理员获取待审核列表（默认 status=待审核，按提交时间正序）
+# 期望：200，data.list 含 3.1 提交的记录，含申请人摘要 applicant
+GET {{host}}/admin/certifications?page=1&pageSize=10
+Authorization: Bearer {{tokenAdmin}}
+
+# 4.3 审核驳回-未填理由 → 400「驳回时必须填写驳回理由」
+PATCH {{host}}/admin/certifications/1/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "reject"
+}
+
+# 4.4 审核驳回（填理由）→ 200；用户侧可查 rejectReason
+# 注意：将路径中的 1 替换为 4.2 列表中实际的认证 ID
+PATCH {{host}}/admin/certifications/1/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "reject",
+  "reason": "证明材料模糊，请重新上传清晰的校园卡照片"
+}
+
+# 4.5 驳回后用户重新提交 → 200（已驳回允许再提，插入新行留痕）
+POST {{host}}/users/me/certification
+Authorization: Bearer {{tokenStudentNoCert}}
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "college": "经济管理学院",
+  "proofImages": ["https://example.com/proof/card2.jpg"]
+}
+
+# 4.6 审核通过 → 200；同事务回写 user.is_certified=1
+# 期望：随后用户重新登录或查询认证状态为「已通过」
+PATCH {{host}}/admin/certifications/2/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+# 4.7 重复审核同一记录 → 409「该认证记录已被审核」（非待审核状态拦截）
+PATCH {{host}}/admin/certifications/2/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+# 4.8 审核不存在的认证 ID → 404「认证记录不存在」
+PATCH {{host}}/admin/certifications/99999/review
+Authorization: Bearer {{tokenAdmin}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+# ---------------------------------------------------------------------
+# 5. 实名状态守卫 CertifiedGuard 说明
+# ---------------------------------------------------------------------
+# CertifiedGuard 已注册为全局守卫（JwtAuthGuard → RolesGuard → CertifiedGuard），
+# 仅对标记 @RequireCertified() 的接口生效：未实名用户访问返回 403「请先完成实名认证」。
+# 本阶段尚无业务接口使用该装饰器（发布商品/私聊接口属阶段3/4），
+# 阶段3 接入时补充对应拦截用例：
+#   5.1 未实名学生发布商品 → 403
+#   5.2 未实名学生发起私聊 → 403
+#   5.3 已实名学生正常发布/私聊 → 放行
+
+# ---------------------------------------------------------------------
+# 6. 禁用账号场景（需管理员先在库中将账号 status 置为「禁用」，属阶段6管理接口，
+#    本阶段可手工 SQL 验证：UPDATE user SET status='禁用' WHERE student_no='20211231246';）
+# ---------------------------------------------------------------------
+# 6.1 禁用账号登录 → 403「账号已被禁用，请联系管理员」
+# 6.2 已登录用户被禁用后，旧 Token 访问 → 401（守卫实时查库拦截）
+# 恢复：UPDATE user SET status='正常' WHERE student_no='20211231246';

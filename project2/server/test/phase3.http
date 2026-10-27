@@ -1,0 +1,447 @@
+# =====================================================================
+# 阶段3 测试用例（REST Client 格式，VS Code 装 REST Client 插件可直接执行）
+# 前置：1) 阶段2 用例已通过；npm run seed:accounts 已预置账号
+#       2) 服务已启动：npm run start:dev（默认 http://localhost:8080）
+# 账号：admin/admin123（管理员）；20211231245/abc12345（已实名学生）
+#       20211231246/abc12345（未实名学生）
+# 统一前缀：/api/v1；统一响应：{code, message, data}，code=0 成功
+# =====================================================================
+
+@host = http://localhost:8080/api/v1
+
+# ---------------------------------------------------------------------
+# 0. 登录拿 Token（把返回 data.token 填入下面变量）
+# ---------------------------------------------------------------------
+
+# 0.1 管理员登录
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "admin",
+  "password": "admin123"
+}
+
+# 0.2 已实名学生登录
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231245",
+  "password": "abc12345"
+}
+
+# 0.3 未实名学生登录
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "studentNo": "20211231246",
+  "password": "abc12345"
+}
+
+@adminToken = 粘贴0.1返回的token
+@studentToken = 粘贴0.2返回的token
+@uncertifiedToken = 粘贴0.3返回的token
+
+# ---------------------------------------------------------------------
+# 1. 分类模块 Category
+# ---------------------------------------------------------------------
+
+# 1.1 公开分类列表（匿名可访问，仅启用）
+# 期望：200，code=0，仅 status=启用 的分类
+GET {{host}}/categories
+
+# 1.2 管理员新增分类
+# 期望：200，code=0，记下 data.id 供后续用例使用（设为 @categoryId）
+POST {{host}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "教材教辅",
+  "sortOrder": 1
+}
+
+# 1.3 新增分类-重名 → 409「分类名已被占用」
+POST {{host}}/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "教材教辅"
+}
+
+# 1.4 学生新增分类 → 403（角色守卫拦截）
+POST {{host}}/categories
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "name": "学生禁止"
+}
+
+# 1.5 管理员分类列表（含停用，分页）
+# 期望：200，含 list/total/page/pageSize
+GET {{host}}/admin/categories?page=1&pageSize=10
+Authorization: Bearer {{adminToken}}
+
+# 1.6 编辑分类（改名/停用）
+# 期望：200；停用后公开列表不再返回
+PUT {{host}}/categories/替换为分类ID
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "教材教辅（二手）",
+  "status": "停用"
+}
+
+# 1.7 删除被商品引用的分类 → 409「该分类已被商品引用，无法删除」
+# 前置：先执行完 2.2 发布商品后，再删除该商品所属分类
+DELETE {{host}}/categories/替换为被引用分类ID
+Authorization: Bearer {{adminToken}}
+
+# 1.8 删除未被引用的分类 → 200
+DELETE {{host}}/categories/替换为未引用分类ID
+Authorization: Bearer {{adminToken}}
+
+# ---------------------------------------------------------------------
+# 2. 商品模块 Goods（发布/编辑/删除/上下架）
+# ---------------------------------------------------------------------
+
+# 2.1 未实名用户发布商品 → 403（实名守卫拦截）
+POST {{host}}/goods
+Authorization: Bearer {{uncertifiedToken}}
+Content-Type: application/json
+
+{
+  "title": "未实名发布测试",
+  "price": 10,
+  "categoryId": 1,
+  "conditionLevel": "全新",
+  "campus": "东区",
+  "tradeMethod": "当面交易",
+  "description": "未实名应被拦截"
+}
+
+# 2.2 已实名用户发布商品成功
+# 期望：200，code=0，data.status='待审核'，记下 data.id（设为 @goodsId）
+POST {{host}}/goods
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "title": "九成新高等数学教材",
+  "price": 25.5,
+  "categoryId": 替换为分类ID,
+  "conditionLevel": "几乎全新",
+  "campus": "东区",
+  "tradeMethod": "当面交易",
+  "description": "无笔记，东区图书馆当面交易",
+  "images": []
+}
+
+# 2.3 发布商品-分类停用 → 400「分类不存在或已停用」
+POST {{host}}/goods
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "title": "停用分类测试",
+  "price": 10,
+  "categoryId": 替换为已停用分类ID,
+  "conditionLevel": "全新",
+  "campus": "西区",
+  "tradeMethod": "宿舍自提",
+  "description": "停用分类应报400"
+}
+
+# 2.4 发布商品-图片超过9张 → 400
+POST {{host}}/goods
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "title": "图片超限测试",
+  "price": 10,
+  "categoryId": 1,
+  "conditionLevel": "全新",
+  "campus": "东区",
+  "tradeMethod": "当面交易",
+  "description": "图片超过9张",
+  "images": ["http://a.com/1.jpg","http://a.com/2.jpg","http://a.com/3.jpg","http://a.com/4.jpg","http://a.com/5.jpg","http://a.com/6.jpg","http://a.com/7.jpg","http://a.com/8.jpg","http://a.com/9.jpg","http://a.com/10.jpg"]
+}
+
+# 2.5 编辑商品（本人）→ 状态重置为待审核
+# 期望：200，data.status='待审核'
+PUT {{host}}/goods/替换为goodsId
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "title": "九成新高等数学教材（修订版）",
+  "price": 20,
+  "categoryId": 替换为分类ID,
+  "conditionLevel": "明显使用痕迹",
+  "campus": "南区",
+  "tradeMethod": "宿舍自提",
+  "description": "有少量笔记，降价处理",
+  "images": []
+}
+
+# 2.6 编辑他人商品 → 403「只能操作本人发布的商品」
+PUT {{host}}/goods/替换为goodsId
+Authorization: Bearer {{uncertifiedToken}}
+Content-Type: application/json
+
+{
+  "title": "越权编辑",
+  "price": 1,
+  "categoryId": 1,
+  "conditionLevel": "全新",
+  "campus": "东区",
+  "tradeMethod": "当面交易",
+  "description": "越权应被拦截"
+}
+
+# 2.7 删除商品（本人，逻辑删）→ 200
+DELETE {{host}}/goods/替换为待删goodsId
+Authorization: Bearer {{studentToken}}
+
+# ---------------------------------------------------------------------
+# 3. 商品状态机（上下架/已售出）
+# ---------------------------------------------------------------------
+
+# 3.1 下架：在售 → 已下架（需商品先通过审核为在售，见 4.2）
+# 期望：200，data.status='已下架'
+PATCH {{host}}/goods/替换为goodsId/status
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "action": "off"
+}
+
+# 3.2 上架：已下架 → 在售
+# 期望：200，data.status='在售'
+PATCH {{host}}/goods/替换为goodsId/status
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "action": "on"
+}
+
+# 3.3 非法流转：待审核 直接下架 → 409
+PATCH {{host}}/goods/替换为待审核goodsId/status
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "action": "off"
+}
+
+# 3.4 标记已售出：在售/已下架 → 已售出（终态）
+# 期望：200，data.status='已售出'
+PATCH {{host}}/goods/替换为goodsId/status
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "action": "sold"
+}
+
+# 3.5 终态再编辑 → 409「当前状态（已售出）不可编辑」
+PUT {{host}}/goods/替换为已售出goodsId
+Authorization: Bearer {{studentToken}}
+Content-Type: application/json
+
+{
+  "title": "终态编辑测试",
+  "price": 10,
+  "categoryId": 1,
+  "conditionLevel": "全新",
+  "campus": "东区",
+  "tradeMethod": "当面交易",
+  "description": "已售出不可编辑"
+}
+
+# ---------------------------------------------------------------------
+# 4. 商品审核（管理员）
+# ---------------------------------------------------------------------
+
+# 4.1 审核列表：默认待审核，按提交时间正序
+# 期望：200，含发布者摘要 publisher.nickname/isCertified
+GET {{host}}/admin/goods?page=1&pageSize=10
+Authorization: Bearer {{adminToken}}
+
+# 4.2 审核通过 → 在售
+# 期望：200，data.status='在售'
+PATCH {{host}}/admin/goods/替换为goodsId/review
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+# 4.3 重复审核同一商品 → 409「该商品已审核」
+PATCH {{host}}/admin/goods/替换为goodsId/review
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "result": "pass"
+}
+
+# 4.4 驳回但未填理由 → 400「驳回时必须填写驳回理由」
+PATCH {{host}}/admin/goods/替换为待审核goodsId/review
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "result": "reject"
+}
+
+# 4.5 驳回成功 → 已驳回（理由留痕）
+PATCH {{host}}/admin/goods/替换为待审核goodsId/review
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "result": "reject",
+  "reason": "商品图片不清晰，请重新上传"
+}
+
+# 4.6 学生访问审核接口 → 403
+GET {{host}}/admin/goods
+Authorization: Bearer {{studentToken}}
+
+# 4.7 违规下架：在售 → 违规下架（理由必填）
+# 期望：200，data.status='违规下架'
+PATCH {{host}}/admin/goods/替换为在售goodsId/takedown
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "reason": "商品图片含违规信息"
+}
+
+# 4.8 违规下架无理由 → 400
+PATCH {{host}}/admin/goods/替换为在售goodsId/takedown
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{}
+
+# ---------------------------------------------------------------------
+# 5. 商品列表与详情（公开/权限）
+# ---------------------------------------------------------------------
+
+# 5.1 公开列表：匿名访问，仅在售商品
+# 期望：200，list 中所有商品 status='在售'
+GET {{host}}/goods?page=1&pageSize=10
+
+# 5.2 关键词搜索（命中标题或描述）
+GET {{host}}/goods?keyword=数学&page=1&pageSize=10
+
+# 5.3 筛选+排序：价格区间 + 价格升序
+GET {{host}}/goods?minPrice=10&maxPrice=100&sort=price_asc
+
+# 5.4 价格区间非法：minPrice > maxPrice → 400
+GET {{host}}/goods?minPrice=100&maxPrice=10
+
+# 5.5 详情-在售商品：匿名可见
+# 期望：200，含 publisher 摘要
+GET {{host}}/goods/替换为在售goodsId
+
+# 5.6 详情-非在售商品：匿名访问 → 404「商品不存在」
+GET {{host}}/goods/替换为待审核goodsId
+
+# 5.7 详情-非在售商品：本人可见
+# 期望：200
+GET {{host}}/goods/替换为待审核goodsId
+Authorization: Bearer {{studentToken}}
+
+# 5.8 详情-非在售商品：他人访问 → 404
+GET {{host}}/goods/替换为待审核goodsId
+Authorization: Bearer {{uncertifiedToken}}
+
+# 5.9 详情-不存在 → 404
+GET {{host}}/goods/99999999
+
+# 5.10 我的发布：全部状态分页
+# 期望：200，含 待审核/已驳回/在售/已下架/已售出 等本人全部商品
+GET {{host}}/goods/my?page=1&pageSize=10
+Authorization: Bearer {{studentToken}}
+
+# 5.11 我的发布-按状态筛选
+GET {{host}}/goods/my?status=待审核
+Authorization: Bearer {{studentToken}}
+
+# ---------------------------------------------------------------------
+# 6. 文件上传 Files
+# ---------------------------------------------------------------------
+
+# 6.1 上传图片成功（选择真实 jpg/png/webp 文件，≤5MB）
+# 期望：200，data.url='/uploads/xxx.jpg'
+POST {{host}}/files/upload
+Authorization: Bearer {{studentToken}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="test.jpg"
+Content-Type: image/jpeg
+
+< ./test.jpg
+------WebKitFormBoundary--
+
+# 6.2 未登录上传 → 401
+POST {{host}}/files/upload
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="test.jpg"
+Content-Type: image/jpeg
+
+< ./test.jpg
+------WebKitFormBoundary--
+
+# 6.3 伪造扩展名（txt 改后缀为 .jpg）→ 400「文件内容与图片格式不符」
+# 操作：新建 test.txt 写入文本，重命名为 fake.jpg 后上传
+POST {{host}}/files/upload
+Authorization: Bearer {{studentToken}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="fake.jpg"
+Content-Type: image/jpeg
+
+< ./fake.jpg
+------WebKitFormBoundary--
+
+# 6.4 非法类型（.gif/.svg/.exe）→ 400「仅支持 jpg/jpeg/png/webp 图片」
+POST {{host}}/files/upload
+Authorization: Bearer {{studentToken}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="test.gif"
+Content-Type: image/gif
+
+< ./test.gif
+------WebKitFormBoundary--
+
+# 6.5 超过5MB → 413 Payload Too Large
+# 操作：准备一个 >5MB 的图片文件上传
+POST {{host}}/files/upload
+Authorization: Bearer {{studentToken}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="big.jpg"
+Content-Type: image/jpeg
+
+< ./big.jpg
+------WebKitFormBoundary--
